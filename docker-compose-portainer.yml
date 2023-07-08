@@ -1,0 +1,672 @@
+# Copyright (c) 2023 Battelle Energy Alliance, LLC.  All rights reserved.
+
+version: '3.7'
+
+services:
+  opensearch:
+    build:
+      context: .
+      dockerfile: Dockerfiles/opensearch.Dockerfile
+    image: ghcr.io/idaholab/malcolm/opensearch:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: opensearch
+    networks:
+      - default
+    env_file:
+      - ./config/process.env
+      - ./config/ssl.env
+      - ./config/opensearch.env
+    environment:
+      VIRTUAL_HOST : 'os.malcolm.local'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./.opensearch.primary.curlrc:/var/local/curlrc/.opensearch.primary.curlrc:ro
+      - ./.opensearch.secondary.curlrc:/var/local/curlrc/.opensearch.secondary.curlrc:ro
+      - ./opensearch:/usr/share/opensearch/data:delegated
+      - ./opensearch-backup:/opt/opensearch/backup:delegated
+      - ./opensearch/opensearch.keystore:/usr/share/opensearch/config/persist/opensearch.keystore:rw
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--fail", "http://localhost:9200"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 180s
+  dashboards-helper:
+    build:
+      context: .
+      dockerfile: Dockerfiles/dashboards-helper.Dockerfile
+    image: ghcr.io/idaholab/malcolm/dashboards-helper:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: dashboards-helper
+    networks:
+      - default
+    env_file:
+      - stack.env
+    environment:
+      VIRTUAL_HOST : 'dashboards-helper.malcolm.local'
+    depends_on:
+      - opensearch
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./.opensearch.primary.curlrc:/var/local/curlrc/.opensearch.primary.curlrc:ro
+      - ./.opensearch.secondary.curlrc:/var/local/curlrc/.opensearch.secondary.curlrc:ro
+    healthcheck:
+      test: ["CMD", "supervisorctl", "status", "cron", "maps"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+  dashboards:
+    build:
+      context: .
+      dockerfile: Dockerfiles/dashboards.Dockerfile
+    image: ghcr.io/idaholab/malcolm/dashboards:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: dashboards
+    networks:
+      - default
+    env_file:
+      - stack.env
+    environment:
+      VIRTUAL_HOST : 'dashboards.malcolm.local'
+    depends_on:
+      - opensearch
+      - dashboards-helper
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./.opensearch.primary.curlrc:/var/local/curlrc/.opensearch.primary.curlrc:ro
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--fail", "http://localhost:5601/dashboards/api/status"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 210s
+  logstash:
+    build:
+      context: .
+      dockerfile: Dockerfiles/logstash.Dockerfile
+    image: ghcr.io/idaholab/malcolm/logstash-oss:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: logstash
+    networks:
+      - default
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    cap_add:
+      - IPC_LOCK
+    env_file:
+      - stack.env
+    depends_on:
+      - opensearch
+    ports:
+      - "127.0.0.1:5044:5044"
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./.opensearch.primary.curlrc:/var/local/curlrc/.opensearch.primary.curlrc:ro
+      - ./.opensearch.secondary.curlrc:/var/local/curlrc/.opensearch.secondary.curlrc:ro
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.orig.yml:ro
+      - ./logstash/pipelines:/usr/share/logstash/malcolm-pipelines.available:ro
+      - ./logstash/patterns:/usr/share/logstash/malcolm-patterns:ro
+      - ./logstash/ruby:/usr/share/logstash/malcolm-ruby:ro
+      - ./logstash/maps/malcolm_severity.yaml:/etc/malcolm_severity.yaml:ro
+      - ./logstash/certs/ca.crt:/certs/ca.crt:ro
+      - ./logstash/certs/server.crt:/certs/server.crt:ro
+      - ./logstash/certs/server.key:/certs/server.key:ro
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--fail", "http://localhost:9600"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 600s
+  filebeat:
+    build:
+      context: .
+      dockerfile: Dockerfiles/filebeat.Dockerfile
+    image: ghcr.io/idaholab/malcolm/filebeat-oss:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: filebeat
+    networks:
+      - default
+    env_file:
+      - stack.env
+    depends_on:
+      - logstash
+    ports:
+      - "127.0.0.1:5045:5045"
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./.opensearch.primary.curlrc:/var/local/curlrc/.opensearch.primary.curlrc:ro
+      - nginx-log-path:/nginx:ro
+      - ./zeek-logs:/zeek
+      - ./suricata-logs:/suricata
+      - ./filebeat/certs/ca.crt:/certs/ca.crt:ro
+      - ./filebeat/certs/client.crt:/certs/client.crt:ro
+      - ./filebeat/certs/client.key:/certs/client.key:ro
+    healthcheck:
+      test: ["CMD", "supervisorctl", "status", "filebeat"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+  arkime:
+    build:
+      context: .
+      dockerfile: Dockerfiles/arkime.Dockerfile
+    image: ghcr.io/idaholab/malcolm/arkime:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: arkime
+    networks:
+      - default
+    env_file:
+      - stack.env
+    environment:
+      VIRTUAL_HOST : 'arkime.malcolm.local'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    depends_on:
+      - opensearch
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./.opensearch.primary.curlrc:/var/local/curlrc/.opensearch.primary.curlrc:ro
+      - ./pcap:/data/pcap
+      - ./arkime-logs:/opt/arkime/logs
+      - ./arkime-raw:/opt/arkime/raw
+      - ./arkime/etc/config.ini:/opt/arkime/etc/config.orig.ini:ro
+      - ./arkime/etc/user_settings.json:/opt/arkime/etc/user_settings.json:ro
+      - ./arkime/wise/source.zeeklogs.js:/opt/arkime/wiseService/source.zeeklogs.js:ro
+    healthcheck:
+      test: ["CMD", "curl", "--insecure", "--silent", "--fail", "https://localhost:8005/_ns_/nstest.html"]
+      interval: 90s
+      timeout: 30s
+      retries: 3
+      start_period: 210s
+  zeek:
+    build:
+      context: .
+      dockerfile: Dockerfiles/zeek.Dockerfile
+    image: ghcr.io/idaholab/malcolm/zeek:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: zeek
+    networks:
+      - default
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    cap_add:
+      - IPC_LOCK
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+    env_file:
+      - stack.env
+    depends_on:
+      - opensearch
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./pcap:/pcap
+      - ./zeek-logs/upload:/zeek/upload
+      - ./zeek-logs/extract_files:/zeek/extract_files
+      - ./zeek/config/local.zeek:/opt/zeek/share/zeek/site/local.zeek:ro
+      - ./zeek/intel:/opt/zeek/share/zeek/site/intel
+    healthcheck:
+      test: ["CMD", "supervisorctl", "status", "pcap-zeek"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+  zeek-live:
+    build:
+      context: .
+      dockerfile: Dockerfiles/zeek.Dockerfile
+    image: ghcr.io/idaholab/malcolm/zeek:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    network_mode: host
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    cap_add:
+      - IPC_LOCK
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+    env_file:
+      - stack.env
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./zeek-logs/live:/zeek/live
+      - ./zeek-logs/extract_files:/zeek/extract_files
+      - ./zeek/config/local.zeek:/opt/zeek/share/zeek/site/local.zeek:ro
+      - ./zeek/intel:/opt/zeek/share/zeek/site/intel
+  suricata:
+    build:
+      context: .
+      dockerfile: Dockerfiles/suricata.Dockerfile
+    image: ghcr.io/idaholab/malcolm/suricata:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: suricata
+    networks:
+      - default
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    cap_add:
+      - IPC_LOCK
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+    env_file:
+      - stack.env
+    depends_on:
+      - logstash
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./suricata-logs:/var/log/suricata
+      - ./pcap:/data/pcap
+      - ./suricata/rules:/opt/suricata/rules:ro
+    healthcheck:
+      test: ["CMD", "supervisorctl", "status", "pcap-suricata"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+  suricata-live:
+    build:
+      context: .
+      dockerfile: Dockerfiles/suricata.Dockerfile
+    image: ghcr.io/idaholab/malcolm/suricata:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    network_mode: host
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    cap_add:
+      - IPC_LOCK
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+    env_file:
+      - stack.env
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./suricata-logs:/var/log/suricata
+      - ./suricata/rules:/opt/suricata/rules:ro
+  file-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfiles/file-monitor.Dockerfile
+    image: ghcr.io/idaholab/malcolm/file-monitor:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: file-monitor
+    networks:
+      - default
+    env_file:
+      - stack.env
+    environment:
+      VIRTUAL_HOST : 'file-monitor.malcolm.local'
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./zeek-logs/extract_files:/zeek/extract_files
+      - ./zeek-logs/current:/zeek/logs
+      - ./yara/rules:/yara-rules/custom:ro
+    healthcheck:
+      test: ["CMD", "supervisorctl", "status", "watcher", "logger"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+  pcap-capture:
+    build:
+      context: .
+      dockerfile: Dockerfiles/pcap-capture.Dockerfile
+    image: ghcr.io/idaholab/malcolm/pcap-capture:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    network_mode: host
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    cap_add:
+      - IPC_LOCK
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+    env_file:
+      - stack.env
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./pcap/upload:/pcap
+  pcap-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfiles/pcap-monitor.Dockerfile
+    image: ghcr.io/idaholab/malcolm/pcap-monitor:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: pcap-monitor
+    networks:
+      - default
+    env_file:
+      - stack.env
+    depends_on:
+      - opensearch
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./.opensearch.primary.curlrc:/var/local/curlrc/.opensearch.primary.curlrc:ro
+      - ./zeek-logs:/zeek
+      - ./pcap:/pcap
+    healthcheck:
+      test: ["CMD", "supervisorctl", "status", "watch-upload", "pcap-publisher"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 90s
+  upload:
+    build:
+      context: .
+      dockerfile: Dockerfiles/file-upload.Dockerfile
+    image: ghcr.io/idaholab/malcolm/file-upload:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: upload
+    networks:
+      - default
+    env_file:
+      - stack.env
+    environment:
+      VIRTUAL_HOST : 'upload.malcolm.local'
+    depends_on:
+      - arkime
+    ports:
+      - "127.0.0.1:8022:22"
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./pcap/upload:/var/www/upload/server/php/chroot/files
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+  htadmin:
+    image: ghcr.io/idaholab/malcolm/htadmin:23.05.1
+    build:
+      context: .
+      dockerfile: Dockerfiles/htadmin.Dockerfile
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: htadmin
+    networks:
+      - default
+    env_file:
+      - stack.env
+    environment:
+      VIRTUAL_HOST : 'htadmin.malcolm.local'
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./htadmin/config.ini:/var/www/htadmin/config/config.ini:rw
+      - ./htadmin/metadata:/var/www/htadmin/config/metadata:rw
+      - ./nginx/htpasswd:/var/www/htadmin/auth/htpasswd:rw
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--fail", "http://localhost"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+  freq:
+    image: ghcr.io/idaholab/malcolm/freq:23.05.1
+    build:
+      context: .
+      dockerfile: Dockerfiles/freq.Dockerfile
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: freq
+    networks:
+      - default
+    env_file:
+      - stack.env
+    environment:
+      VIRTUAL_HOST : 'freq.malcolm.local'
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--fail", "http://localhost:10004"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+  netbox:
+    image: ghcr.io/idaholab/malcolm/netbox:23.05.1
+    build:
+      context: .
+      dockerfile: Dockerfiles/netbox.Dockerfile
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: netbox
+    networks:
+      - default
+    env_file:
+      - stack.env
+    environment:
+      VIRTUAL_HOST : 'netbox.malcolm.local'
+    depends_on:
+      - netbox-postgres
+      - netbox-redis
+      - netbox-redis-cache
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./netbox/config/configuration:/etc/netbox/config:ro
+      - ./netbox/config/reports:/etc/netbox/reports:ro
+      - ./netbox/config/scripts:/etc/netbox/scripts:ro
+      - ./netbox/media:/opt/netbox/netbox/media:rw
+      - ./net-map.json:/usr/local/share/net-map.json:ro
+      - ./netbox/service-template-defaults.json:/etc/service-template-defaults.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "http://localhost:8080/netbox/api/" ]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+  netbox-postgres:
+    image: ghcr.io/idaholab/malcolm/postgresql:23.05.1
+    build:
+      context: .
+      dockerfile: Dockerfiles/postgresql.Dockerfile
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: netbox-postgres
+    networks:
+      - default
+    env_file:
+      - stack.env
+    environment:
+      VIRTUAL_HOST : 'netbox-postgres.malcolm.local'
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./netbox/postgres:/var/lib/postgresql/data:rw
+    healthcheck:
+      test: [ "CMD-SHELL", "[[ $${NETBOX_POSTGRES_DISABLED} == 'true' ]] || pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}" ]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 45s
+  netbox-redis:
+    image: ghcr.io/idaholab/malcolm/redis:23.05.1
+    build:
+      context: .
+      dockerfile: Dockerfiles/redis.Dockerfile
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: netbox-redis
+    networks:
+      - default
+    env_file:
+      - stack.env
+    environment:
+      VIRTUAL_HOST : 'netbox-redis.malcolm.local'
+    command:
+      - sh
+      - -c
+      - redis-server --appendonly yes --requirepass $$REDIS_PASSWORD
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./netbox/redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "[[ $${NETBOX_REDIS_DISABLED} == 'true' ]] || ( pidof redis-server || exit 1 )" ]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 45s
+  netbox-redis-cache:
+    image: ghcr.io/idaholab/malcolm/redis:23.05.1
+    build:
+      context: .
+      dockerfile: Dockerfiles/redis.Dockerfile
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: netbox-redis-cache
+    networks:
+      - default
+    env_file:
+      - stack.env
+    environment:
+      VIRTUAL_HOST : 'netbox-redis-cache.malcolm.local'
+    command:
+      - sh
+      - -c
+      - redis-server --requirepass $$REDIS_PASSWORD
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+    healthcheck:
+      test: ["CMD-SHELL", "[[ $${NETBOX_REDIS_DISABLED} == 'true' ]] || ( pidof redis-server || exit 1 )" ]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 45s
+  api:
+    image: ghcr.io/idaholab/malcolm/api:23.05.1
+    build:
+      context: .
+      dockerfile: Dockerfiles/api.Dockerfile
+    command: gunicorn --bind 0:5000 manage:app
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: api
+    networks:
+      - default
+    env_file:
+      - stack.env
+    environment:
+      VIRTUAL_HOST : 'api.malcolm.local'
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - ./.opensearch.primary.curlrc:/var/local/curlrc/.opensearch.primary.curlrc:ro
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--fail", "http://localhost:5000/mapi/ping"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+  nginx-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfiles/nginx.Dockerfile
+    image: ghcr.io/idaholab/malcolm/nginx-proxy:23.05.1
+    restart: "no"
+    stdin_open: false
+    tty: true
+    hostname: nginx-proxy
+    networks:
+      - default
+    env_file:
+      - stack.env
+    depends_on:
+      - api
+      - arkime
+      - dashboards
+      - file-monitor
+      - htadmin
+      - netbox
+      - upload
+    ports:
+      - "0.0.0.0:443:443"
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - ./nginx/ca-trust:/var/local/ca-trust:ro
+      - nginx-log-path:/var/log/nginx:rw
+      - ./nginx/nginx_ldap.conf:/etc/nginx/nginx_ldap.conf:ro
+      - ./nginx/htpasswd:/etc/nginx/auth/htpasswd:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/certs/dhparam.pem:/etc/nginx/dhparam/dhparam.pem:ro
+    healthcheck:
+      test: ["CMD", "curl", "--insecure", "--silent", "https://localhost:443"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+    labels:
+      traefik.enable: 'false'
+      # traefik.http.routers.osmalcolm.rule: 'Host(``)'
+      # traefik.http.routers.osmalcolm.entrypoints: ''
+      # traefik.http.routers.osmalcolm.tls.certresolver: ''
+      # traefik.http.routers.osmalcolm.service: 'osmalcolm'
+      # traefik.http.services.osmalcolm.loadbalancer.server.port: '9200'
+      # traefik.http.routers.malcolm.rule: 'Host(``)'
+      # traefik.http.routers.malcolm.entrypoints: ''
+      # traefik.http.routers.malcolm.tls.certresolver: ''
+      # traefik.http.routers.malcolm.service: 'malcolm'
+      # traefik.http.services.malcolm.loadbalancer.server.port: '443'
+
+# shared named volume so filebeat can access nginx access logs
+volumes:
+  nginx-log-path:
+
+networks:
+  default:
+    external: false
