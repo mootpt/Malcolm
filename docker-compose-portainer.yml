@@ -15,9 +15,7 @@ services:
     networks:
       - default
     env_file:
-      - ./config/process.env
-      - ./config/ssl.env
-      - ./config/opensearch.env
+      - stack.env
     environment:
       VIRTUAL_HOST : 'os.malcolm.local'
     ulimits:
